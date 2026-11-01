@@ -98,9 +98,14 @@ CATEGORIES = {
     "Gift Subscription": {
         "keywords": [
             "gift subscription", "gift a subscription",
-            "send as a gift", "gift magazine",
+            "send as a gift", "gift magazine","as a birthday gift",
+"for my mother",
+"for someone else",
+"gift recipient",
+"subscription as a gift",
+"purchase a subscription for",
         ],
-        "team": "Subscription Services",
+        "team": "Subscription Sales",
         "workflow": (
             "Provide approved gift-subscription options, pricing, and "
             "delivery information."
@@ -153,8 +158,198 @@ CHANNEL_GUIDANCE = {
 }
 
 
+
 def classify_request(message, channel, repeat_contact):
     text = re.sub(r"\s+", " ", message.lower()).strip()
+
+    scores = {
+        category: sum(
+            1 for keyword in details["keywords"] if keyword in text
+        )
+        for category, details in CATEGORIES.items()
+    }
+
+    has_address = scores["Address Change"] > 0
+    has_delivery = scores["Missing or Late Issue"] > 0
+    has_digital = scores["Digital Access"] > 0
+    has_billing = scores["Billing & Payments"] > 0
+    has_cancellation = scores["Cancellation & Refund"] > 0
+
+    # Detect a message containing both an address change and delivery issue.
+    multiple_issues = has_address and has_delivery
+
+    # Give specific requests precedence over incidental keywords.
+    if repeat_contact or any(term in text for term in [
+        "third time", "still not fixed", "manager", "supervisor",
+        "complaint", "multiple times", "unresolved", "formal complaint"
+    ]):
+        category = "Complaint or Escalation"
+    elif multiple_issues:
+        category = "Needs Clarification"
+    elif has_cancellation:
+        category = "Cancellation & Refund"
+    elif has_digital:
+        category = "Digital Access"
+    elif scores["Gift Subscription"] > 0:
+        category = "Gift Subscription"
+    elif has_billing:
+        category = "Billing & Payments"
+    else:
+        precedence = [
+            "Missing or Late Issue",
+            "Address Change",
+            "Subscription & Renewal",
+            "General Subscriber Question",
+        ]
+        matched = [c for c in precedence if scores[c] > 0]
+        category = (
+            max(matched, key=lambda c: scores[c])
+            if matched else "Needs Clarification"
+        )
+
+    if category == "Needs Clarification":
+        team = "Subscriber Service Triage"
+        workflow = (
+            "The message may contain multiple requests or lacks enough "
+            "detail. A person should clarify each issue and route it "
+            "to the appropriate team."
+        )
+        confidence = "Low — clarification needed"
+    else:
+        team = CATEGORIES[category]["team"]
+        workflow = CATEGORIES[category]["workflow"]
+        confidence = (
+            "Moderate" if scores[category] == 1 else "Higher (rule-based)"
+        )
+
+    # Elevate cancellation requests caused by unresolved delivery problems.
+    cancellation_after_delivery = has_cancellation and has_delivery
+
+    high_priority_terms = [
+        "charged twice", "duplicate charge", "fraud", "unauthorized",
+        "third time", "multiple times", "still not fixed", "manager",
+        "supervisor", "urgent", "formal complaint", "unresolved",
+        "last two", "two magazine issues",
+    ]
+
+    if (
+        category == "Complaint or Escalation"
+        or repeat_contact
+        or cancellation_after_delivery
+        or any(term in text for term in high_priority_terms)
+    ):
+        priority = "High"
+        priority_reason = (
+            "An escalation, repeat contact, unresolved delivery problem "
+            "connected to cancellation, or potential high-impact issue "
+            "was detected. Confirm priority against service-level rules."
+        )
+    elif category == "Needs Clarification":
+        priority = "Normal — provisional"
+        priority_reason = (
+            "The request is unclear or may contain multiple issues. "
+            "Confirm the request and impact before assigning a final priority."
+        )
+    elif category in [
+        "General Subscriber Question", "Gift Subscription"
+    ]:
+        priority = "Low"
+        priority_reason = "The request appears to be routine."
+    else:
+        priority = "Normal"
+        priority_reason = (
+            "No configured high-priority trigger was detected. Review "
+            "publisher-specific service targets before final assignment."
+        )
+
+    payment_access_conflict = (
+        has_digital
+        and has_billing
+        and any(term in text for term in [
+            "paid", "payment", "inactive", "account says"
+        ])
+    )
+
+    review_terms = [
+        "refund", "credit", "charged", "charge", "cancel",
+        "complaint", "manager", "supervisor", "fraud",
+        "unauthorized", "identity theft", "lawyer", "lawsuit",
+        "discrimination",
+    ]
+
+    human_review = (
+        category in [
+            "Complaint or Escalation",
+            "Needs Clarification",
+            "Cancellation & Refund",
+        ]
+        or repeat_contact
+        or multiple_issues
+        or payment_access_conflict
+        or any(term in text for term in review_terms)
+    )
+
+    reasons = []
+
+    if any(term in text for term in [
+        "charged", "charge", "refund", "credit", "paid", "payment"
+    ]):
+        reasons.append("Payment or refund details may need verification.")
+
+    if category == "Cancellation & Refund":
+        reasons.append("Cancellation or refund policy may need review.")
+
+    if category == "Complaint or Escalation":
+        reasons.append(
+            "A person should review the complaint and prior contacts."
+        )
+
+    if category == "Needs Clarification":
+        reasons.append(
+            "The request may contain multiple issues or needs clarification."
+        )
+
+    if repeat_contact:
+        reasons.append(
+            "Repeat contact may require continuity or escalation."
+        )
+
+    if multiple_issues:
+        reasons.append(
+            "A person should separate and route each request."
+        )
+
+    if payment_access_conflict:
+        reasons.append(
+            "The reported payment and inactive digital-access status "
+            "should be checked."
+        )
+
+    if any(term in text for term in [
+        "fraud", "unauthorized", "identity theft",
+        "lawyer", "lawsuit", "discrimination"
+    ]):
+        reasons.append(
+            "A potentially sensitive issue needs human assessment."
+        )
+
+    if not human_review:
+        reasons.append(
+            "Routine request; automated handling should only be used "
+            "under approved procedures."
+        )
+
+    return {
+        "Category": category,
+        "Priority": priority,
+        "Recommended team": team,
+        "Recommended workflow": workflow,
+        "Human review": "Yes" if human_review else "Not routinely required",
+        "Review reason": " ".join(reasons),
+        "Classification signal": confidence,
+        "Priority rationale": priority_reason,
+        "Channel guidance": CHANNEL_GUIDANCE[channel],
+    }
 
     scores = {
         category: sum(
